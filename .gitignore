@@ -1,0 +1,7 @@
+# cache files
+models/__pycache__
+utils/__pycache__
+
+
+# data files
+data/

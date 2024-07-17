@@ -1,0 +1,1 @@
+>The T-Finance dataset is available at [link](https://drive.google.com/drive/folders/1DKO8edxNJ3UUWq-w2f6mLlKecr1itEUr) (Rethinking Graph Neural Networks for Anomaly Detection. Tang, Jianheng and Li, Jiajin and Gao, Ziqi and Li, Jia).
