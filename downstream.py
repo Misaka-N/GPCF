@@ -14,6 +14,7 @@ from utils.tools import set_random
 from utils.dataloader import pretrain_dataloader
 from utils.tools import EarlyStopping, label_smoothing
 from sklearn.metrics import roc_auc_score, f1_score, accuracy_score, recall_score, average_precision_score
+import warnings
 
 
 def divide_dataset(g, num_classes, shot):
@@ -24,6 +25,9 @@ def divide_dataset(g, num_classes, shot):
         class_nodes = np.where(labels == class_id)[0]
 
         np.random.shuffle(class_nodes)
+
+        if len(class_nodes) < shot:
+            warnings.warn(f'the node num of class{class_id} ({len(class_nodes)}) is less than {shot}')
 
         train_nodes = class_nodes[:shot]
         remaining_nodes = class_nodes[shot:]
@@ -60,18 +64,18 @@ if __name__ == "__main__":
     print("---Downloading dataset: " + args.dataset + "---")
     g, dataname, num_classes = pretrain_dataloader(input_dim=args.input_dim, dataset=args.dataset)
     print("---Divide dataset: " + args.dataset + "---")
-    train_idx, val_idx, test_idx = divide_dataset(g, num_classes, args.shot, args.neighbor_layer, args.neighbor_num, args.batch_size)
+    train_idx, val_idx, test_idx = divide_dataset(g, num_classes, args.shot)
     neighbor_sampler = MultiLayerNeighborSampler([args.neighbor_num] * args.neighbor_layer)
-    train_dataloader = dgl.dataloading.Dataloader(g, train_idx, neighbor_sampler, device=device, use_ddp=False, batch_size=args.batch_size, shuffle=True, drop_last=False, num_workers=0)
-    val_dataloader = dgl.dataloading.Dataloader(g, val_idx, neighbor_sampler, device=device, use_ddp=False, batch_size=args.batch_size, shuffle=True, drop_last=False, num_workers=0)
-    test_dataloader = dgl.dataloading.Dataloader(g, test_idx, neighbor_sampler, device=device, use_ddp=False, batch_size=args.batch_size, shuffle=True, drop_last=False, num_workers=0)
+    train_dataloader = dgl.dataloading.DataLoader(g, train_idx, neighbor_sampler, device=device, use_ddp=False, batch_size=args.batch_size, shuffle=True, drop_last=False, num_workers=0)
+    val_dataloader = dgl.dataloading.DataLoader(g, val_idx, neighbor_sampler, device=device, use_ddp=False, batch_size=args.batch_size, shuffle=True, drop_last=False, num_workers=0)
+    test_dataloader = dgl.dataloading.DataLoader(g, test_idx, neighbor_sampler, device=device, use_ddp=False, batch_size=args.batch_size, shuffle=True, drop_last=False, num_workers=0)
 
     # Get prompt
     print("---Creating new prompt component---")
     prompt = PromptComponent(prompt_num=args.prompt_num, prompt_dim=args.prompt_dim, input_dim=args.input_dim).to(device)
 
     # Answering head
-    answering = AnswerFunc(input_dim=args.prompt_dim, hidden_dim=args.prompt_dim, output_dim=args.prompt_dim).to(device)
+    answering = AnswerFunc(input_dim=2 * args.prompt_dim, hidden_dim=args.prompt_dim, output_dim=num_classes).to(device)
 
     # Downstream tasks
     print("---Dealing with downstream task---")
@@ -80,7 +84,7 @@ if __name__ == "__main__":
                 output_dim=args.output_dim,
                 gnn_layer=args.gnn_layer,
                 ).to(device)
-    gnn.load_state_dict(torch.load(args.pretrained_model))
+    gnn.conv_layers.load_state_dict(torch.load(args.pretrained_model))
 
     optimizer = optim.Adam(list(prompt.parameters()) + list(answering.parameters()), lr=args.lr, weight_decay=args.decay)
     early_stopper = EarlyStopping(path=args.prompt_path, patience=args.patience, min_delta=0)
@@ -98,14 +102,14 @@ if __name__ == "__main__":
             blocks = [block.to(device) for block in blocks]
             final_block = gnn(g, blocks)
 
-            prompt_emb = prompt(final_block)
+            prompt_emb = prompt(g, final_block)
 
             predict_ans = answering(prompt_emb).cpu()
 
-            true_labels = g.ndata['label'][seeds].to(device)
+            true_labels = g.ndata['label'][seeds].cpu()
             soft_label = label_smoothing(true_labels, args.label_smoothing, num_classes)
 
-            train_loss = kl_loss(F.log_softmax(predict_ans, dim=-1), soft_label) / len(predict_ans)
+            train_loss = kl_loss(F.log_softmax(predict_ans, dim=-1), soft_label) / predict_ans.shape[0]
 
             optimizer.zero_grad()
             train_loss.backward()
@@ -114,16 +118,17 @@ if __name__ == "__main__":
             _, predict = torch.max(predict_ans, dim=1)
             accuracy = accuracy_score(true_labels.cpu().numpy(), predict.cpu().numpy())
 
-            tot_loss.append(train_loss.item())
+            tot_loss.append(train_loss)
             tot_acc.append(accuracy)
 
         avg_loss = sum(tot_loss) / len(tot_loss)
         avg_acc = sum(tot_acc) / len(tot_acc)
 
-        print("Epoch: {} | Step: {} | Loss: {:.4f} | ACC: {:.4f}".format(epoch, step, avg_loss, avg_acc))
+        print("Epoch: {} | Loss: {:.4f} | ACC: {:.4f}".format(epoch, avg_loss, avg_acc))
 
         # Evaluation
-        if (epoch + 1) % 10 == 0: 
+        if (epoch + 1) % 10 == 0:
+            # Set the models to evaluation mode
             gnn.eval()
             prompt.eval()
             answering.eval()
@@ -133,46 +138,43 @@ if __name__ == "__main__":
                 blocks = [block.to(device) for block in blocks]
                 final_block = gnn(g, blocks)
 
-                prompt_emb = prompt(final_block)
+                prompt_emb = prompt(g, final_block)
 
                 predict_ans = answering(prompt_emb).cpu()
 
-                labels = g.ndata['label'][seeds].to(device)
+                labels = g.ndata['label'][seeds].cpu()
                 _, predict = torch.max(predict_ans, dim=1)
+                predict_prob = F.softmax(predict_ans, dim=1)
 
-                # metrics
                 accuracy = accuracy_score(labels, predict)
                 recall = recall_score(labels, predict, average='macro')
                 f1 = f1_score(labels, predict, average='macro')
 
                 if num_classes == 2:
-                    auc = roc_auc_score(labels, predict_ans[ :,1]) # for binary classification
+                    auc = roc_auc_score(labels, predict_prob[:, 1].detach().numpy())
+                    ap = average_precision_score(labels, predict_prob[:, 1].detach().numpy())
                 else:
-                    auc = roc_auc_score(labels, predict_ans, multi_class='ovr')
-
-                if num_classes == 2:
-                    ap = average_precision_score(labels, predict_ans[ :,1]) # for binary classification
-                else:
-                    ap = average_precision_score(labels, predict_ans)
+                    auc = roc_auc_score(labels, predict_prob.detach().numpy(), multi_class='ovr', average='macro')
+                    ap = average_precision_score(labels, predict_prob.detach().numpy(), average='macro')
 
                 tot_acc.append(accuracy)
                 tot_auc.append(auc)
                 tot_f1.append(f1)
                 tot_ap.append(ap)
                 tot_recall.append(recall)
-            
+
             avg_acc = sum(tot_acc) / len(tot_acc)
             avg_auc = sum(tot_auc) / len(tot_auc)
             avg_f1 = sum(tot_f1) / len(tot_f1)
             avg_ap = sum(tot_ap) / len(tot_ap)
             avg_recall = sum(tot_recall) / len(tot_recall)
 
-            early_stopper((prompt, answering), -(avg_acc+avg_auc+avg_recall+avg_f1+avg_ap))
+            early_stopper((prompt, answering), -(avg_acc + avg_auc + avg_recall + avg_f1 + avg_ap))
             if early_stopper.early_stop:
                 print("Stopping training...")
                 break
 
-            print("Epoch: {} | ACC: {:.4f} | AUC: {:.4f} | F1: {:.4f} | Recall : {:.4f} | AP: {:.4f}".format(epoch+1, avg_acc, avg_auc, avg_f1, avg_recall, avg_ap))
+            print("Epoch: {} | ACC: {:.4f} | AUC: {:.4f} | F1: {:.4f} | Recall : {:.4f} | AP: {:.4f}".format(epoch + 1, avg_acc, avg_auc, avg_f1, avg_recall, avg_ap))
 
     # test on the best model
     print("Evaluating on the best model...")
@@ -187,27 +189,24 @@ if __name__ == "__main__":
         blocks = [block.to(device) for block in blocks]
         final_block = gnn(g, blocks)
 
-        prompt_emb = prompt(final_block)
+        prompt_emb = prompt(g, final_block)
 
         predict_ans = answering(prompt_emb).cpu()
 
-        labels = g.ndata['label'][seeds].to(device)
+        labels = g.ndata['label'][seeds].cpu()
         _, predict = torch.max(predict_ans, dim=1)
+        predict_prob = F.softmax(predict_ans, dim=1)
 
-        # metrics
         accuracy = accuracy_score(labels, predict)
         recall = recall_score(labels, predict, average='macro')
         f1 = f1_score(labels, predict, average='macro')
 
         if num_classes == 2:
-            auc = roc_auc_score(labels, predict_ans[ :,1]) # for binary classification
+            auc = roc_auc_score(labels, predict_prob[:, 1].detach().numpy())
+            ap = average_precision_score(labels, predict_prob[:, 1].detach().numpy())
         else:
-            auc = roc_auc_score(labels, predict_ans, multi_class='ovr')
-
-        if num_classes == 2:
-            ap = average_precision_score(labels, predict_ans[ :,1]) # for binary classification
-        else:
-            ap = average_precision_score(labels, predict_ans)
+            auc = roc_auc_score(labels, predict_prob.detach().numpy(), multi_class='ovr', average='macro')
+            ap = average_precision_score(labels, predict_prob.detach().numpy(), average='macro')
 
         tot_acc.append(accuracy)
         tot_auc.append(auc)

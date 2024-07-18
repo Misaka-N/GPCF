@@ -17,6 +17,7 @@ from models.encoder import GCNEncoder, MoCo
 import torch.nn.functional as F
 import warnings
 import copy
+import gc
 
 def meta_train(g, support_task_loader, model):
     task_loss, task_nodes = 0., 0
@@ -48,7 +49,7 @@ def nodes_sampler(g, sample_shots, num_classes):
         if len(sorted_nodes[i]) < sample_num_per_class:
             warnings.warn(f'the node num of class{i} ({len(sorted_nodes[i])}) is less than {sample_num_per_class}')
 
-    sampled_nodes_idx = [sorted_nodes[i][:sample_num_per_class] for i in range(num_classes)]
+    sampled_nodes_idx = [sorted_nodes[i][:min(len(sorted_nodes[i]), sample_num_per_class)] for i in range(num_classes)]
     sampled_nodes_idx = torch.cat(sampled_nodes_idx)
 
     return sampled_nodes_idx

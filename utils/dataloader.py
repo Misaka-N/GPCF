@@ -42,10 +42,10 @@ def pretrain_dataloader(input_dim:int, dataset:str):
 
     elif dataset == 'Amazon_Photo' or dataset == 'Amazon_Computer':
         if dataset == 'Amazon_Photo':
-            data = Amazon(root='../data/', name='photo')
+            data = Amazon(root='../autodl-tmp/data/', name='photo')
             dataname = 'Photo'
         elif dataset == 'Amazon_Computer':
-            data = Amazon(root='../data/', name='computers')
+            data = Amazon(root='../autodl-tmp/data/', name='computers')
             dataname = 'Computers'
 
         num_classes = data.num_classes
@@ -78,5 +78,6 @@ def pretrain_dataloader(input_dim:int, dataset:str):
     g = dgl.graph((edge_index[0], edge_index[1]), num_nodes = len(x))
     g.ndata['feat'] = x
     g.ndata['label'] = y
+    g = dgl.add_self_loop(g)
 
     return g, dataname, num_classes

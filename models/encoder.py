@@ -74,7 +74,7 @@ class MoCo():
 
 class GCNEncoder(nn.Module):
 
-    def __init__(self, input_dim, hidden_dim, output_dim, gnn_layer, projector_layer, lr, temper, weight, first_order=False, allow_unused=None, allow_nograd=False):
+    def __init__(self, input_dim, hidden_dim, output_dim, gnn_layer, projector_layer, lr, temper, weight, conv_layers=None, projector=None, first_order=False, allow_unused=None, allow_nograd=False):
         super(GCNEncoder, self).__init__()
 
         self.input_dim = input_dim
@@ -93,18 +93,23 @@ class GCNEncoder(nn.Module):
         self.allow_unused = allow_unused
 
         # GCN Encoder (fast update)
-        self.conv_layers = torch.nn.ModuleList([GraphConv(self.input_dim , self.hidden_dim)])
-        for _ in range(self.gnn_layer - 2):
-            self.conv_layers.append(GraphConv(self.hidden_dim , self.hidden_dim))
-        self.conv_layers.append(GraphConv(self.hidden_dim , self.output_dim))
+        if conv_layers == None:
+            self.conv_layers = torch.nn.ModuleList([GraphConv(self.input_dim , self.hidden_dim)])
+            for _ in range(self.gnn_layer - 2):
+                self.conv_layers.append(GraphConv(self.hidden_dim , self.hidden_dim))
+            self.conv_layers.append(GraphConv(self.hidden_dim , self.output_dim))
+        else:
+            self.conv_layers = conv_layers
 
         # MoCo GCN Encoder (low update)
         self.moco_conv_layers = copy.deepcopy(self.conv_layers)
         set_grad(self.moco_conv_layers, False) # disable grad backward
 
         # Projector
-        self.projector = Projector(self.output_dim, self.output_dim, self.output_dim, self.projector_layer)
-
+        if projector == None:
+            self.projector = Projector(self.output_dim, self.output_dim, self.output_dim, self.projector_layer)
+        else:
+            self.projector = projector
 
     def meta_update(self, module, lr, grads=None):
         if grads is not None:
@@ -115,9 +120,8 @@ class GCNEncoder(nn.Module):
                 print(msg)
             for p, g in zip(params, grads):
                 if g is not None:
-                    p.update = - lr * g
-        return update_module(module)
-
+                    # Update the parameter in-place
+                    p.data.add_(- lr * g)
 
     def adapt(self, loss, first_order=None, allow_unused=None, allow_nograd=None):
         if first_order is None:
@@ -155,8 +159,8 @@ class GCNEncoder(nn.Module):
         gnn_gradients = gradients[:gnn_param_count]
         projector_gradients = gradients[gnn_param_count:]
 
-        self.conv_layers = self.meta_update(self.conv_layers, self.lr, gnn_gradients)
-        self.projector = self.meta_update(self.projector, self.lr, projector_gradients)   
+        self.meta_update(self.conv_layers, self.lr, gnn_gradients)
+        self.meta_update(self.projector, self.lr, projector_gradients)
 
     def contrastive_loss(self, g, blocks, proj_h, moco_h):
         neighbor_feats = neighbor_feats_sampler(g, blocks[-1])
@@ -175,7 +179,7 @@ class GCNEncoder(nn.Module):
 
         loss = center_loss_all + self.weight * neighbor_loss_all
 
-        return loss
+        return loss / len(blocks[-1].dstdata['feat'])
     
     def aggregation(self, g, blocks):
         # GNN aggregation & projection
@@ -214,7 +218,7 @@ class GCNEncoder(nn.Module):
 class GCN(nn.Module):
 
     def __init__(self, input_dim, hidden_dim, output_dim, gnn_layer):
-        super(GCNEncoder, self).__init__()
+        super(GCN, self).__init__()
 
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
