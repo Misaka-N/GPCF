@@ -16,7 +16,6 @@ from utils.tools import EarlyStopping, label_smoothing
 from sklearn.metrics import roc_auc_score, f1_score, accuracy_score, recall_score, average_precision_score
 import warnings
 
-
 def divide_dataset(g, num_classes, shot):
     labels = g.ndata['label'].numpy() 
     train_idx, val_idx, test_idx = [], [], []
@@ -88,8 +87,8 @@ if __name__ == "__main__":
 
     optimizer = optim.Adam(list(prompt.parameters()) + list(answering.parameters()), lr=args.lr, weight_decay=args.decay)
     early_stopper = EarlyStopping(path=args.prompt_path, patience=args.patience, min_delta=0)
-    # cross_loss = nn.CrossEntropyLoss()
     kl_loss = torch.nn.KLDivLoss(reduction='batchmean')
+    ce_loss = nn.CrossEntropyLoss()
 
     # Train
     for epoch in range(args.max_epoches):
@@ -105,11 +104,13 @@ if __name__ == "__main__":
             prompt_emb = prompt(g, final_block)
 
             predict_ans = answering(prompt_emb).cpu()
-
             true_labels = g.ndata['label'][seeds].cpu()
-            soft_label = label_smoothing(true_labels, args.label_smoothing, num_classes)
 
-            train_loss = kl_loss(F.log_softmax(predict_ans, dim=-1), soft_label) / predict_ans.shape[0]
+            if num_classes == 2: 
+                train_loss = ce_loss(F.softmax(predict_ans, dim=-1), true_labels) / predict_ans.shape[0]
+            else:
+                soft_label = label_smoothing(true_labels, args.label_smoothing, num_classes)
+                train_loss = kl_loss(F.log_softmax(predict_ans, dim=-1), soft_label) / predict_ans.shape[0]
 
             optimizer.zero_grad()
             train_loss.backward()
@@ -133,7 +134,7 @@ if __name__ == "__main__":
             prompt.eval()
             answering.eval()
 
-            tot_acc, tot_auc, tot_f1, tot_ap, tot_recall = [], [], [], [], []
+            predict, pred, label = [], [], []
             for step, (input_nodes, seeds, blocks) in enumerate(val_dataloader):
                 blocks = [block.to(device) for block in blocks]
                 final_block = gnn(g, blocks)
@@ -141,40 +142,33 @@ if __name__ == "__main__":
                 prompt_emb = prompt(g, final_block)
 
                 predict_ans = answering(prompt_emb).cpu()
+                
+                predict.extend(predict_ans.argmax(dim=1).tolist())
+                predict_ans = F.softmax(predict_ans, dim=-1)
+                pred.extend(predict_ans.detach().numpy().tolist())
+                label.extend(g.ndata['label'][seeds].cpu().tolist())
 
-                labels = g.ndata['label'][seeds].cpu()
-                _, predict = torch.max(predict_ans, dim=1)
-                predict_prob = F.softmax(predict_ans, dim=1)
+            pred = torch.tensor(pred)
+            predict = torch.tensor(predict)
+            label = torch.tensor(label)
 
-                accuracy = accuracy_score(labels, predict)
-                recall = recall_score(labels, predict, average='macro')
-                f1 = f1_score(labels, predict, average='macro')
+            accuracy = accuracy_score(label, predict)
+            recall = recall_score(label, predict, average='macro')
+            f1 = f1_score(label, predict, average='macro')
 
-                if num_classes == 2:
-                    auc = roc_auc_score(labels, predict_prob[:, 1].detach().numpy())
-                    ap = average_precision_score(labels, predict_prob[:, 1].detach().numpy())
-                else:
-                    auc = roc_auc_score(labels, predict_prob.detach().numpy(), multi_class='ovr', average='macro')
-                    ap = average_precision_score(labels, predict_prob.detach().numpy(), average='macro')
+            if num_classes == 2:
+                auc = roc_auc_score(label, pred[ :,1]) # for binary classification
+                ap = average_precision_score(label, pred[ :,1]) # for binary classification
+            else:
+                auc = roc_auc_score(label, pred, multi_class='ovr')
+                ap = average_precision_score(label, pred)
 
-                tot_acc.append(accuracy)
-                tot_auc.append(auc)
-                tot_f1.append(f1)
-                tot_ap.append(ap)
-                tot_recall.append(recall)
-
-            avg_acc = sum(tot_acc) / len(tot_acc)
-            avg_auc = sum(tot_auc) / len(tot_auc)
-            avg_f1 = sum(tot_f1) / len(tot_f1)
-            avg_ap = sum(tot_ap) / len(tot_ap)
-            avg_recall = sum(tot_recall) / len(tot_recall)
-
-            early_stopper((prompt, answering), -(avg_acc + avg_auc + avg_recall + avg_f1 + avg_ap))
+            early_stopper((prompt, answering), -(accuracy + auc + f1))
             if early_stopper.early_stop:
                 print("Stopping training...")
                 break
 
-            print("Epoch: {} | ACC: {:.4f} | AUC: {:.4f} | F1: {:.4f} | Recall : {:.4f} | AP: {:.4f}".format(epoch + 1, avg_acc, avg_auc, avg_f1, avg_recall, avg_ap))
+            print("Epoch: {} | ACC: {:.4f} | AUC: {:.4f} | F1: {:.4f} | Recall : {:.4f} | AP: {:.4f}".format(epoch + 1, accuracy, auc, f1, recall, ap))
 
     # test on the best model
     print("Evaluating on the best model...")
@@ -184,7 +178,7 @@ if __name__ == "__main__":
     prompt.eval()
     answering.eval()
 
-    tot_acc, tot_auc, tot_f1, tot_ap, tot_recall = [], [], [], [], []
+    predict, pred, label = [], [], []
     for step, (input_nodes, seeds, blocks) in enumerate(test_dataloader):
         blocks = [block.to(device) for block in blocks]
         final_block = gnn(g, blocks)
@@ -192,32 +186,25 @@ if __name__ == "__main__":
         prompt_emb = prompt(g, final_block)
 
         predict_ans = answering(prompt_emb).cpu()
+        
+        predict.extend(predict_ans.argmax(dim=1).tolist())
+        predict_ans = F.softmax(predict_ans, dim=-1)
+        pred.extend(predict_ans.detach().numpy().tolist())
+        label.extend(g.ndata['label'][seeds].cpu().tolist())
 
-        labels = g.ndata['label'][seeds].cpu()
-        _, predict = torch.max(predict_ans, dim=1)
-        predict_prob = F.softmax(predict_ans, dim=1)
+    pred = torch.tensor(pred)
+    predict = torch.tensor(predict)
+    label = torch.tensor(label)
 
-        accuracy = accuracy_score(labels, predict)
-        recall = recall_score(labels, predict, average='macro')
-        f1 = f1_score(labels, predict, average='macro')
+    accuracy = accuracy_score(label, predict)
+    recall = recall_score(label, predict, average='macro')
+    f1 = f1_score(label, predict, average='macro')
 
-        if num_classes == 2:
-            auc = roc_auc_score(labels, predict_prob[:, 1].detach().numpy())
-            ap = average_precision_score(labels, predict_prob[:, 1].detach().numpy())
-        else:
-            auc = roc_auc_score(labels, predict_prob.detach().numpy(), multi_class='ovr', average='macro')
-            ap = average_precision_score(labels, predict_prob.detach().numpy(), average='macro')
+    if num_classes == 2:
+        auc = roc_auc_score(label, pred[ :,1]) # for binary classification
+        ap = average_precision_score(label, pred[ :,1]) # for binary classification
+    else:
+        auc = roc_auc_score(label, pred, multi_class='ovr')
+        ap = average_precision_score(label, pred)
 
-        tot_acc.append(accuracy)
-        tot_auc.append(auc)
-        tot_f1.append(f1)
-        tot_ap.append(ap)
-        tot_recall.append(recall)
-    
-    avg_acc = sum(tot_acc) / len(tot_acc)
-    avg_auc = sum(tot_auc) / len(tot_auc)
-    avg_f1 = sum(tot_f1) / len(tot_f1)
-    avg_ap = sum(tot_ap) / len(tot_ap)
-    avg_recall = sum(tot_recall) / len(tot_recall)
-    
-    print("Final: | ACC: {:.4f} | AUC: {:.4f} | F1: {:.4f} | Recall : {:.4f} | AP: {:.4f}".format(avg_acc, avg_auc, avg_f1, avg_recall, avg_ap))
+    print("Epoch: {} | ACC: {:.4f} | AUC: {:.4f} | F1: {:.4f} | Recall : {:.4f} | AP: {:.4f}".format(epoch + 1, accuracy, auc, f1, recall, ap))

@@ -18,21 +18,6 @@ def pretrain_dataloader(input_dim:int, dataset:str):
         num_classes = 2
         g = data[0]
         g = dgl.to_homogeneous(g, ndata=['feature','label','train_mask','val_mask','test_mask'])
-        # if dataname == "Yelp_Fraud":
-        #     selected_nodes = np.random.choice(g.num_nodes(), 15000, replace=False)
-        #     sg = g.subgraph(selected_nodes)
-        #     for ntype in sg.ntypes:
-        #         for feature in g.nodes[ntype].data:
-        #             sg.nodes[ntype].data[feature] = g.nodes[ntype].data[feature][sg.ndata[dgl.NID]]
-    
-        #     for etype in sg.etypes:
-        #         for feature in g.edges[etype].data:
-        #             sg.edges[etype].data[feature] = g.edges[etype].data[feature][sg.edata[dgl.EID]]
-        #     src, dst = sg.edges()
-        #     edge_index = torch.stack([src, dst], dim=0)
-        #     x = sg.ndata['feature']
-        #     y = sg.ndata['label']
-        # else:
         src, dst = g.edges()
         edge_index = torch.stack([src, dst], dim=0)
         x = g.ndata['feature']
@@ -75,8 +60,12 @@ def pretrain_dataloader(input_dim:int, dataset:str):
     x, y = data.x, data.y
     edge_index = data.edge_index 
 
+    x_mean = torch.mean(x, dim=0)
+    x_std = torch.std(x, dim=0)
+    normalized_x = (x - x_mean) / (x_std + 1e-5)
+
     g = dgl.graph((edge_index[0], edge_index[1]), num_nodes = len(x))
-    g.ndata['feat'] = x
+    g.ndata['feat'] = normalized_x
     g.ndata['label'] = y
     g = dgl.add_self_loop(g)
 

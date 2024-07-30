@@ -50,6 +50,7 @@ class Projector(nn.Module):
     def forward(self, x):
 
         x_emb = self.linears[0](x)
+        x_emb = F.relu(x_emb)
 
         for i in range(self.num_layers - 1):
             x_emb = F.relu(self.linears[i + 1](x_emb))
